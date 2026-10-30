@@ -16,7 +16,7 @@ import ntpath
 import os
 import posixpath
 import re
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 _WIN_DRIVE = re.compile(r"^[A-Za-z]:")
 
@@ -68,8 +68,56 @@ def claude_project_dir(path: str) -> str:
 
 def is_within(child: str, parent: str) -> bool:
     c, p = key(child), key(parent)
+    if not c or not p:
+        return False
     sep = "\\" if _is_windows_path(display(child)) else "/"
     return c == p or c.startswith(p.rstrip(sep) + sep)
+
+
+def remap(raw: str, src: str, dst: str) -> str | None:
+    """`raw` with the `src` folder replaced by `dst`, written in the SAME spelling as `raw`.
+
+    None when `raw` is not `src` or inside it. Each agent reads its own spelling back, so a
+    Codex `\\\\?\\C:\\...` stays extended, a Gemini `c:/users/...` stays lower-case with forward
+    slashes, an Antigravity `file:///c%3A/...` stays a percent-encoded URI.
+    """
+    if not raw or not is_within(raw, src):
+        return None
+    old_disp, src_disp, dst_disp = display(raw), display(src), display(dst)
+    win = _is_windows_path(old_disp)
+    sep = "\\" if win else "/"
+    suffix = old_disp[len(src_disp.rstrip("\\/")):]
+    new_disp = dst_disp.rstrip("\\/") + suffix
+    stripped = raw.strip()
+    trailing = len(stripped) > 3 and stripped[-1] in "\\/"
+
+    if stripped.lower().startswith("file:"):
+        out = _as_uri(new_disp, stripped, win)
+    else:
+        body = stripped[4:] if stripped.startswith(("\\\\?\\", "//?/")) else stripped
+        out = new_disp
+        if win and "/" in body and "\\" not in body:
+            out = out.replace("\\", "/")
+        if win and body == body.lower() and body != body.upper():
+            out = out.lower()
+        if stripped.startswith("\\\\?\\"):
+            out = "\\\\?\\" + out
+    if trailing and not out.endswith(("/", "\\")):
+        out += "/" if stripped.endswith("/") else sep
+    return out
+
+
+def _as_uri(new_disp: str, raw: str, win: bool) -> str:
+    m = re.match(r"(?i)file:///([a-z])(%3a|:)(.*)$", raw)
+    rest_raw = m.group(3) if m else raw[7:]
+    encode = " " not in rest_raw  # a literal space means this store does not percent-encode
+    if win and _WIN_DRIVE.match(new_disp):
+        drive = new_disp[0].lower() if (m and m.group(1).islower()) else new_disp[0].upper()
+        colon = m.group(2) if m else ":"
+        rest = new_disp[2:].replace("\\", "/")
+        return f"file:///{drive}{colon}{quote(rest, safe='/') if encode else rest}"
+    p = new_disp.replace("\\", "/")
+    return "file://" + (quote(p, safe="/") if encode else p)
 
 
 TEMP_MARKERS = (

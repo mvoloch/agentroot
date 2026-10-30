@@ -11,8 +11,10 @@ After a few months the same repository lives in a dozen places, and moving any o
 `agentroot` reads all of them and shows you, per project, every folder and every session each
 agent has, so you can bring the mess down to `~/Projects/<project>` without losing history.
 
-> **Status: early.** `agentroot scan` works and is read-only. The move command (`apply`) is
-> designed (see [docs/RISKS.md](docs/RISKS.md)) but not written yet.
+> **Status: early.** `scan` is read-only and stable. `move` works and has been rehearsed on a
+> copy of real data (169,000 path rewrites across all four agents, verified, undone byte for
+> byte), but it rewrites private formats of tools that change often: back up, close every
+> agent, and start with a small project.
 
 ## What it finds
 
@@ -40,7 +42,19 @@ python -m pip install git+https://github.com/<owner>/agentroot   # not published
 agentroot homes                      # which agent data directories exist on this machine
 agentroot scan                       # projects, folders and sessions per agent
 agentroot scan --html report.html --json catalog.json
+
+agentroot move C:\code\my-app C:\Projetos\my-app          # dry run: prints every change
+agentroot move C:\code\my-app C:\Projetos\my-app --yes    # apply (refuses while any agent runs)
+agentroot undo                                            # reverse the last move
+agentroot journal                                         # list past moves
 ```
+
+`move` moves the folder, renames Claude Code's session folders, rewrites the path in every
+registry of every agent in that store's own spelling, runs `git worktree repair`, leaves a
+junction at the old path, verifies that nothing still points there, and journals each step
+under `~/.agentroot/journal/` with a backup of every file it touched. If any step fails,
+everything is rolled back. Conversation bodies are never rewritten
+([why](docs/RISKS.md)). `--no-move` only rewrites references, for a folder you already moved.
 
 From a checkout: `PYTHONPATH=src python -m agentroot scan`.
 

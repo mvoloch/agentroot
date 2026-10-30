@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+# scan output can contain your own folder names: keep it out of the repo
+agentroot-*.json
+agentroot-*.html
+report.html
+catalog.json

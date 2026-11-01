@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentroot"
-version = "0.1.0.dev0"
+version = "0.1.0"
 description = "One folder per project for Claude Code, Codex and Antigravity: find every session, worktree and path each agent recorded, then reorganize without losing history."
 readme = "README.md"
 license = "MIT"
@@ -12,13 +12,19 @@ requires-python = ">=3.11"
 authors = [{ name = "Marcus Voloch" }]
 keywords = ["claude-code", "codex", "antigravity", "ai-agents", "sessions", "worktrees"]
 classifiers = [
+  "Development Status :: 3 - Alpha",
   "Environment :: Console",
+  "Intended Audience :: Developers",
   "Operating System :: Microsoft :: Windows",
-  "Operating System :: MacOS",
-  "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
+  "Topic :: Software Development",
+  "Topic :: Utilities",
 ]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/mvoloch/agentroot"
+Issues = "https://github.com/mvoloch/agentroot/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

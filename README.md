@@ -11,17 +11,57 @@ After a few months the same repository lives in a dozen places, and moving any o
 `agentroot` reads all of them and shows you, per project, every folder and every session each
 agent has, so you can bring the mess down to `~/Projects/<project>` without losing history.
 
-> **Status: early.** `scan` is read-only and stable. `move` has been rehearsed on a copy of real
-> data: 169,000 path rewrites across all four agents, verified, then undone byte for byte, and
-> undone again after new work was written. Still, it rewrites private formats of tools that
-> change often: close every agent and start with a small project.
+Free and open source (MIT), and it will stay that way. No telemetry, no network access, no
+dependencies.
+
+> **Status: alpha, tested on Windows only.** `scan` is read-only and safe to try. `move`, `undo`,
+> `tidy` and `identity` work on a real machine but rewrite private, undocumented formats of tools
+> that change often. Close every agent, back up your profile, and start with a small project.
+> Read [what was tested](#what-was-tested) before you rely on it.
+
+## What was tested
+
+Everything below was run by one person, on Windows, on their own data. Nothing else has been
+tested yet.
+
+| | Tested |
+|---|---|
+| Operating system | Windows 11 Pro (Insider Preview, build 26220) |
+| Machines | Two Windows PCs. One profile was copied from the first to the second, so the copy-to-a-new-machine case is Windows to Windows only. |
+| Python | 3.14.7 (3.12 also installed; 3.11 is the declared minimum) |
+| Git | 2.55.0.windows.5 |
+| Claude | Two installations side by side, a personal account and a Team account: Claude Code 2.1.312 with three config directories (`~/.claude`, two `~/.claude-*`), and the Claude desktop app 4.4212 (`%APPDATA%\Claude`, `~/.claude-enterprise`) |
+| OpenAI | Codex CLI 0.161.0 and the Codex desktop app 26.1027 from the Microsoft Store (the ChatGPT desktop app's coding agent) |
+| Google | Antigravity 2.28.2, Antigravity IDE 2.5.5, and Gemini CLI 0.59.0 through the shared `~/.gemini` registries |
+
+The versions are the ones installed on 1 November 2026. The large `move` rehearsal ran a few
+days earlier on the first machine, with the versions that were current in late October 2026.
+
+What that rehearsal covered:
+- 169,098 changes for one project across Claude Code, the Claude app, Codex and Antigravity;
+- integrity checks: every SQLite database passed `quick_check`, and every JSON file and all
+  215,839 JSONL lines parsed;
+- `undo`, with zero byte differences;
+- a second run with new work appended after the move, where `undo` kept that work.
+
+The tool was then used for real: 112 project moves to reorganize the second machine.
+
+**Not tested at all:**
+- macOS and Linux. Their paths are in the code, but nothing has run there;
+- copying a profile between different operating systems;
+- other agents (Cursor, Windsurf, Copilot and so on): they are not read;
+- other versions of the apps above. A newer release may change its storage. `agentroot` refuses
+  to write a format it does not recognize, but it cannot know about a change it has never seen.
+
+If you run it on anything else, please [open an issue](../../issues) with what happened, even
+when it worked.
 
 ## What it finds
 
 | Agent | Homes it discovers |
 |---|---|
 | Claude Code | `~/.claude`, every `~/.claude-*` config dir (`CLAUDE_CONFIG_DIR`), shared `projects/` through junctions counted once |
-| Claude desktop | `%APPDATA%\Claude`, `~/.claude-enterprise` (Team), macOS/Linux equivalents |
+| Claude desktop | `%APPDATA%\Claude`, `~/.claude-enterprise` (Team); macOS/Linux equivalents untested |
 | Codex | `$CODEX_HOME` or `~/.codex`: both state databases, compressed rollouts, desktop catalog, global state, trust list, worktrees (including the Microsoft Store location) |
 | Antigravity / Gemini CLI | `~/.gemini/antigravity*`, project configs, `projects.json`, `.project_root` markers, trust lists, `%APPDATA%\Antigravity` workspace storage |
 
@@ -33,12 +73,19 @@ Then it groups everything by **git remote** (credentials stripped), so `my_app`,
 - git repositories inside OneDrive/Dropbox/Google Drive/iCloud
 - projects that only exist in temporary or scratch folders
 
-## Use
+## Install
 
-Requires Python 3.11+ (3.14+ also reads Codex's compressed rollouts). No dependencies.
+Requires Python 3.11+ (3.14+ also reads Codex's compressed rollouts) and git.
 
 ```bash
-python -m pip install git+https://github.com/<owner>/agentroot   # not published yet
+python -m pip install git+https://github.com/mvoloch/agentroot@v0.1.0
+```
+
+Or from a checkout, without installing: `PYTHONPATH=src python -m agentroot scan`.
+
+## Use
+
+```bash
 agentroot homes                      # which agent data directories exist on this machine
 agentroot scan                       # projects, folders and sessions per agent
 agentroot scan --html report.html --json catalog.json
@@ -76,7 +123,11 @@ It never deletes and never moves anything itself.
 agent has written since then, restoring old bytes would erase that, so instead it moves the
 project back and rewrites every reference again.
 
-From a checkout: `PYTHONPATH=src python -m agentroot scan`.
+`agentroot identity` is for after you copy a profile to a new machine. A copied Codex profile
+keeps the old machine's remote-control enrollment, and copied Microsoft Store app data keeps
+its device state, so the ChatGPT agent goes on naming the new PC after the old one. `identity`
+reports both; `--fix` removes the foreign enrollment, with a backup. See
+[Moving to a new machine](docs/RISKS.md#moving-to-a-new-machine).
 
 ## Safety
 
@@ -84,15 +135,28 @@ From a checkout: `PYTHONPATH=src python -m agentroot scan`.
   temp dir and read there, so a running agent is never locked or disturbed. A test asserts that
   no file in a fake agent home changes during a scan.
 - It never opens credential files and strips `user:token@` from every git URL before printing.
-- Reports contain paths, counts and dates, not conversation text.
+- Reports contain paths, counts and dates, not conversation text. They do contain your folder
+  names: read one before you share it.
 - `move --yes` and `undo` refuse while any agent runs, including npm-installed CLIs.
 - With `--home <copy>`, environment variables such as `%APPDATA%` and `$CODEX_HOME` are
   ignored, so working on a copy never touches your real profile.
+- Nothing is sent anywhere. `agentroot` makes no network calls.
+
+The software is provided as is, without warranty (see [LICENSE](LICENSE)). It edits files that
+belong to other vendors' apps; it is not affiliated with or endorsed by Anthropic, OpenAI or
+Google.
 
 ## Docs
 
 - [docs/STORAGE.md](docs/STORAGE.md): where each agent records a project path, with evidence.
 - [docs/RISKS.md](docs/RISKS.md): what breaks when a folder moves, and the rules `move` follows.
+
+## Contributing
+
+Reports from other machines are the most useful contribution right now: other operating
+systems, other app versions, other agents. Open an issue with the command, the output and your
+versions. Pull requests are welcome; run `python -m pytest` first. To report a security
+problem privately, see [SECURITY.md](SECURITY.md).
 
 ## Prior art
 

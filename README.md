@@ -11,10 +11,10 @@ After a few months the same repository lives in a dozen places, and moving any o
 `agentroot` reads all of them and shows you, per project, every folder and every session each
 agent has, so you can bring the mess down to `~/Projects/<project>` without losing history.
 
-> **Status: early.** `scan` is read-only and stable. `move` works and has been rehearsed on a
-> copy of real data (169,000 path rewrites across all four agents, verified, undone byte for
-> byte), but it rewrites private formats of tools that change often: back up, close every
-> agent, and start with a small project.
+> **Status: early.** `scan` is read-only and stable. `move` has been rehearsed on a copy of real
+> data: 169,000 path rewrites across all four agents, verified, then undone byte for byte, and
+> undone again after new work was written. Still, it rewrites private formats of tools that
+> change often: close every agent and start with a small project.
 
 ## What it finds
 
@@ -45,16 +45,36 @@ agentroot scan --html report.html --json catalog.json
 
 agentroot move C:\code\my-app C:\Projetos\my-app          # dry run: prints every change
 agentroot move C:\code\my-app C:\Projetos\my-app --yes    # apply (refuses while any agent runs)
+agentroot verify C:\code\my-app C:\Projetos\my-app        # does anything still point at the old path?
 agentroot undo                                            # reverse the last move
 agentroot journal                                         # list past moves
+agentroot identity                                        # after copying a profile to a new machine: what still names the old one
 ```
 
-`move` moves the folder, renames Claude Code's session folders, rewrites the path in every
-registry of every agent in that store's own spelling, runs `git worktree repair`, leaves a
-junction at the old path, verifies that nothing still points there, and journals each step
-under `~/.agentroot/journal/` with a backup of every file it touched. If any step fails,
-everything is rolled back. Conversation bodies are never rewritten
-([why](docs/RISKS.md)). `--no-move` only rewrites references, for a folder you already moved.
+`move` does several things:
+- renames the folder (same drive only: a rename is all or nothing);
+- renames Claude Code's session folders;
+- rewrites the path in every registry of every agent, in that store's own spelling;
+- runs `git worktree repair`;
+- leaves a junction at the old path (`--no-junction` to skip);
+- verifies that nothing still points at the old path;
+- journals each step under `~/.agentroot/journal/`, with a backup of every file it touched.
+
+If any step fails, every step is reversed. Conversation bodies are never rewritten
+([why](docs/RISKS.md)). `--no-move` only rewrites references, for a folder you already moved
+yourself (for example to another drive).
+
+`agentroot tidy --root C:\Projetos --json proposal.json` finds every git working tree on disk
+(not only the ones agents know about) and proposes one action per folder:
+- the project's main copy moves to the root;
+- idle copies whose every commit is already in the main copy or a remote go to `_arquivo`;
+- anything holding work that exists nowhere else is left for you to decide.
+
+It never deletes and never moves anything itself.
+
+`undo` puts the backups back byte for byte only if nothing has changed since the move. If an
+agent has written since then, restoring old bytes would erase that, so instead it moves the
+project back and rewrites every reference again.
 
 From a checkout: `PYTHONPATH=src python -m agentroot scan`.
 
@@ -65,11 +85,14 @@ From a checkout: `PYTHONPATH=src python -m agentroot scan`.
   no file in a fake agent home changes during a scan.
 - It never opens credential files and strips `user:token@` from every git URL before printing.
 - Reports contain paths, counts and dates, not conversation text.
+- `move --yes` and `undo` refuse while any agent runs, including npm-installed CLIs.
+- With `--home <copy>`, environment variables such as `%APPDATA%` and `$CODEX_HOME` are
+  ignored, so working on a copy never touches your real profile.
 
 ## Docs
 
 - [docs/STORAGE.md](docs/STORAGE.md): where each agent records a project path, with evidence.
-- [docs/RISKS.md](docs/RISKS.md): what breaks when a folder moves, and the rules `apply` follows.
+- [docs/RISKS.md](docs/RISKS.md): what breaks when a folder moves, and the rules `move` follows.
 
 ## Prior art
 

@@ -25,7 +25,7 @@ import tomllib
 from collections.abc import Iterator
 
 from agentroot import gitinfo
-from agentroot.adapters.util import iso, load_json, looks_like_path, mtime_iso, strings
+from agentroot.adapters.util import env_dir, iso, load_json, looks_like_path, mtime_iso, strings
 from agentroot.model import Home, Reference, Session
 from agentroot.snapshot import columns, has_table, open_copy
 
@@ -39,7 +39,7 @@ _ROOT_FIELD = re.compile(r"(rootPaths|workspace-roots|[wW]orkspaceRoots|writable
 
 
 def homes(user_home: str) -> list[Home]:
-    path = os.environ.get("CODEX_HOME") or os.path.join(user_home, ".codex")
+    path = env_dir(user_home, "CODEX_HOME", ".codex")
     return [Home(AGENT, path)] if os.path.isdir(path) else []
 
 
@@ -174,7 +174,7 @@ def references(home: Home) -> Iterator[Reference]:
         for p in (data.get("projects") or {}):
             yield Reference(AGENT, home.path, p, "config.toml#projects", "trust")
 
-    local = os.environ.get("LOCALAPPDATA", os.path.join(os.path.dirname(home.path), "AppData", "Local"))
+    local = env_dir(os.path.dirname(home.path), "LOCALAPPDATA", "AppData", "Local")
     roots = [os.path.join(home.path, "worktrees")] + glob.glob(
         os.path.join(local, "Packages", "OpenAI.Codex_*", "LocalCache", "Local", ".codex", "worktrees"))
     for root in roots:

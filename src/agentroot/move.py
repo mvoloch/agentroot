@@ -28,12 +28,12 @@ import re
 import shutil
 import sqlite3
 import subprocess
-import sys
 import time
 from dataclasses import asdict, dataclass, field
 
 from agentroot import gitinfo, paths
 from agentroot.adapters import antigravity, claude, codex
+from agentroot.adapters.util import env_dir
 from agentroot.snapshot import columns, has_table, open_copy
 
 # ----------------------------------------------------------------------------- plan model
@@ -56,6 +56,7 @@ class SqlEdit:
     rowid: int
     old: str
     new: str
+    blob: bool = False  # stored as BLOB: compare and write back as bytes
 
 
 @dataclass
@@ -172,11 +173,6 @@ def rewrite_plain(text: str, src: str, dst: str) -> tuple[str, int]:
 # ----------------------------------------------------------------------------- planning
 
 
-def _read(path: str) -> str:
-    with open(path, "rb") as f:
-        return f.read().decode("utf-8", errors="surrogateescape")
-
-
 def _sha(path: str) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -188,7 +184,8 @@ def _sha(path: str) -> str:
 class _Planner:
     def __init__(self, user_home: str, src: str, dst: str, move_folder: bool):
         self.home = user_home
-        self.plan = Plan(paths.display(src), paths.display(dst), move_folder)
+        # absolute: a relative path matches nothing in any registry, yet the folder would still move
+        self.plan = Plan(os.path.abspath(paths.display(src)), os.path.abspath(paths.display(dst)), move_folder)
         self.src, self.dst = self.plan.src, self.plan.dst
         self._seen: set[str] = set()
 
@@ -201,13 +198,14 @@ class _Planner:
             return
         self._seen.add(real)
         try:
-            old = _read(path)
+            with open(path, "rb") as f:
+                data = f.read()  # read once: the sha must describe exactly the bytes that were rewritten
         except OSError as e:
             self.plan.warnings.append(f"cannot read {path}: {e}")
             return
-        new, n = fn(old, self.src, self.dst, *args)
+        new, n = fn(data.decode("utf-8", errors="surrogateescape"), self.src, self.dst, *args)
         if n:
-            self.plan.text.append(TextEdit(path, store, n, _sha(path), new))
+            self.plan.text.append(TextEdit(path, store, n, hashlib.sha256(data).hexdigest(), new))
 
     def sql(self, db: str, table: str, column: str, json_text: bool = False) -> None:
         if not os.path.isfile(db):
@@ -216,7 +214,8 @@ class _Planner:
             if not has_table(con, table) or column not in columns(con, table):
                 return
             for rowid, value in con.execute(f'select rowid, "{column}" from "{table}" where "{column}" is not null'):
-                if isinstance(value, bytes):
+                blob = isinstance(value, bytes)
+                if blob:
                     try:
                         value = value.decode("utf-8")
                     except UnicodeDecodeError:
@@ -231,7 +230,7 @@ class _Planner:
                     new = paths.remap(value, self.src, self.dst)
                     if new is None:
                         continue
-                self.plan.sql.append(SqlEdit(db, table, column, rowid, value, new))
+                self.plan.sql.append(SqlEdit(db, table, column, rowid, value, new, blob))
 
     # -- agents
     def claude(self) -> None:
@@ -308,7 +307,7 @@ class _Planner:
             self.text(f, "antigravity/gemini config", rewrite_json_text)
         for f in glob.glob(os.path.join(gem, "history", "*", ".project_root")) + glob.glob(os.path.join(gem, "tmp", "*", ".project_root")):
             self.text(f, "gemini .project_root", rewrite_plain)
-        appdata = os.environ.get("APPDATA", os.path.join(self.home, "AppData", "Roaming"))
+        appdata = env_dir(self.home, "APPDATA", "AppData", "Roaming")
         user = os.path.join(appdata, "Antigravity", "User")
         self.text(os.path.join(user, "globalStorage", "storage.json"), "antigravity storage.json", rewrite_json_text)
         self.sql(os.path.join(user, "globalStorage", "state.vscdb"), "ItemTable", "value", json_text=True)
@@ -375,10 +374,21 @@ def plan(user_home: str, src: str, dst: str, move_folder: bool = True) -> Plan:
             raise MoveError(f"destination already exists: {p.dst}")
         if paths.is_within(p.dst, p.src):
             raise MoveError("destination is inside the source")
+        parent = p.dst
+        while not os.path.exists(parent):
+            parent = os.path.dirname(parent)
+        if os.stat(parent).st_dev != os.stat(p.src).st_dev:
+            raise MoveError(f"{p.dst} is on another drive. agentroot only renames within a drive (a rename is all or "
+                            "nothing; a copy can stop half way). Copy the folder yourself, then run with --no-move.")
         p.git()
     p.claude()
     p.codex()
     p.antigravity()
+    sources = {paths.key(r.old) for r in p.plan.renames}
+    for r in p.plan.renames:
+        if paths.key(r.new) in sources and paths.key(r.new) != paths.key(r.old):
+            raise MoveError(f"Claude session folder {os.path.basename(r.new)} would be renamed and also receive "
+                            "another folder; choose a destination name that does not collide")
     for t in p.plan.text:
         _validate(t)
     return p.plan
@@ -388,21 +398,37 @@ def plan(user_home: str, src: str, dst: str, move_folder: bool = True) -> Plan:
 
 AGENT_PROCESSES = {
     "claude.exe", "claude", "codex.exe", "codex", "agy.exe", "agy", "antigravity.exe", "antigravity",
-    "antigravity ide.exe", "language_server_windows_x64.exe", "gemini.exe",
+    "antigravity ide.exe", "gemini.exe", "gemini",
 }
+# npm installs run as node: matched by the package in the command line
+NODE_AGENTS = ("@anthropic-ai/claude-code", "@openai/codex", "@google/gemini-cli")
 
 
 def running_agents() -> list[str]:
+    """Agent processes now running. Fails closed: if processes cannot be listed, that is reported as running."""
+    if os.name == "nt":
+        cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+               "Get-CimInstance Win32_Process | ForEach-Object { $_.Name + [char]9 + $_.CommandLine }"]
+    else:
+        cmd = ["ps", "-axww", "-o", "args="]
     try:
-        if os.name == "nt":
-            out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True, timeout=30).stdout
-            names = [line.split('","')[0].strip('"') for line in out.splitlines() if line]
-        else:
-            out = subprocess.run(["ps", "-axo", "comm="], capture_output=True, text=True, timeout=30).stdout
-            names = [os.path.basename(l.strip()) for l in out.splitlines()]
+        out = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=60).stdout
     except (OSError, subprocess.SubprocessError):
+        out = ""
+    if not out.strip():
         return ["(could not list processes)"]
-    return sorted({n for n in names if n.lower() in AGENT_PROCESSES})
+    found = set()
+    for line in out.splitlines():
+        if os.name == "nt":
+            name, _, args = line.partition("\t")
+        else:
+            args = line.strip()
+            name = os.path.basename(args.split(" ")[0])
+        n, a = name.strip().lower(), args.replace("\\", "/").lower()
+        if n in AGENT_PROCESSES or n.startswith("language_server_") or (
+                n.startswith("node") and any(x in a for x in NODE_AGENTS)):
+            found.add(name.strip())
+    return sorted(found)
 
 
 # ----------------------------------------------------------------------------- execute / undo
@@ -412,9 +438,25 @@ def journal_root(user_home: str) -> str:
     return os.path.join(user_home, ".agentroot", "journal")
 
 
+def _write_json(path: str, data: dict) -> None:
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1)
+    _replace(tmp, path)
+
+
+def _state(path: str) -> dict[str, str | None]:
+    """sha of a store and of its SQLite sidecars (None when absent)."""
+    return {s or "main": (_sha(path + s) if os.path.exists(path + s) else None) for s in ("", "-wal", "-shm")}
+
+
 class _Journal:
     def __init__(self, user_home: str, p: Plan):
-        stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        stamp = base = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        n = 1
+        while os.path.exists(os.path.join(journal_root(user_home), stamp)):  # an undo's reverse move, same second
+            n += 1
+            stamp = f"{base}-{n}"
         self.dir = os.path.join(journal_root(user_home), stamp)
         os.makedirs(os.path.join(self.dir, "files"), exist_ok=False)
         self.data = {
@@ -424,10 +466,7 @@ class _Journal:
         self.save()
 
     def save(self) -> None:
-        tmp = os.path.join(self.dir, "journal.json.tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(self.data, f, ensure_ascii=False, indent=1)
-        _replace(tmp, os.path.join(self.dir, "journal.json"))
+        _write_json(os.path.join(self.dir, "journal.json"), self.data)
 
     def step(self, kind: str, **info) -> None:
         self.data["steps"].append({"kind": kind, **info})
@@ -440,7 +479,7 @@ class _Journal:
             if os.path.exists(path + suffix):
                 dst = os.path.join(self.dir, "files", f"{n}{suffix or '.main'}")
                 shutil.copy2(path + suffix, dst)
-                entry["copies"][suffix or "main"] = {"file": dst, "sha": _sha(path + suffix)}
+                entry["copies"][suffix or "main"] = {"file": dst, "sha": _sha(dst)}
         self.data["backups"].append(entry)
         self.save()
 
@@ -459,10 +498,15 @@ def _replace(tmp: str, dst: str) -> None:
 
 def _atomic_write(path: str, text: str) -> None:
     tmp = path + ".agentroot-tmp"
-    with open(tmp, "wb") as f:
-        f.write(text.encode("utf-8", errors="surrogateescape"))
-    shutil.copymode(path, tmp)
-    _replace(tmp, path)
+    try:
+        with open(tmp, "wb") as f:
+            f.write(text.encode("utf-8", errors="surrogateescape"))
+        shutil.copymode(path, tmp)
+        _replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):  # the replace failed; copymode may have made the leftover read-only
+            os.chmod(tmp, 0o600)
+            os.remove(tmp)
 
 
 def _link(old: str, new: str) -> None:
@@ -475,6 +519,19 @@ def _link(old: str, new: str) -> None:
         os.symlink(new, old, target_is_directory=True)
 
 
+def _is_link_to(link: str, target: str) -> bool:
+    """`link` is a junction/symlink resolving to `target` (and not a real folder of its own)."""
+    return (os.path.lexists(link) and os.path.exists(target) and paths.key(link) != paths.key(target)
+            and paths.key(os.path.realpath(link)) == paths.key(os.path.realpath(target)))
+
+
+def _unlink_dir(link: str) -> None:
+    if os.name == "nt":
+        os.rmdir(link)  # removes the junction, never the target's contents
+    else:
+        os.unlink(link)
+
+
 def _git_repair(main: str, worktrees: list[str]) -> str:
     existing = [w for w in worktrees if os.path.exists(w)]
     if not shutil.which("git") or not os.path.exists(main):
@@ -484,8 +541,7 @@ def _git_repair(main: str, worktrees: list[str]) -> str:
 
 
 def execute(user_home: str, p: Plan, junction: bool = True) -> str:
-    """Apply `p`. Returns the journal id. On any failure everything done so far is undone."""
-    # Refuse if anything changed since the plan was computed.
+    """Apply `p`. Returns the journal id. If any step fails, everything done so far is rolled back."""
     for t in p.text:
         if _sha(t.path) != t.old_sha:
             raise MoveError(f"{t.path} changed after planning; run again")
@@ -497,10 +553,12 @@ def execute(user_home: str, p: Plan, junction: bool = True) -> str:
 
         if p.move_folder:
             os.makedirs(os.path.dirname(p.dst), exist_ok=True)
-            shutil.move(p.src, p.dst)
-            j.step("moved", src=p.src, dst=p.dst)
+            j.step("moved", src=p.src, dst=p.dst)  # journaled first; rollback looks at which side exists
+            os.rename(p.src, p.dst)  # same drive (plan checked): all or nothing, never a partial copy
 
         for t in p.text:
+            if _sha(t.path) != t.old_sha:  # an agent wrote it after planning: its write would be lost
+                raise MoveError(f"{t.path} changed during the move; is an agent running?")
             _atomic_write(t.path, t.new_text)
             j.step("text", path=t.path, count=t.count)
 
@@ -512,8 +570,9 @@ def execute(user_home: str, p: Plan, junction: bool = True) -> str:
             try:
                 con.execute("begin immediate")
                 for e in edits:
+                    old, new = (e.old.encode(), e.new.encode()) if e.blob else (e.old, e.new)
                     cur = con.execute(f'update "{e.table}" set "{e.column}" = ? where rowid = ? and "{e.column}" = ?',
-                                      (e.new, e.rowid, e.old))
+                                      (new, e.rowid, old))
                     if cur.rowcount != 1:
                         raise MoveError(f"{db} {e.table}.{e.column} rowid {e.rowid} changed after planning")
                 con.commit()
@@ -535,88 +594,213 @@ def execute(user_home: str, p: Plan, junction: bool = True) -> str:
                     raise MoveError(f"cannot merge {r.old} into {r.new}: {clash[0]} exists in both")
                 j.step("merged-dir", old=r.old, new=r.new, children=children)
                 for child in children:
-                    shutil.move(os.path.join(r.old, child), os.path.join(r.new, child))
+                    os.rename(os.path.join(r.old, child), os.path.join(r.new, child))
                 os.rmdir(r.old)
             else:
-                os.rename(r.old, r.new)
                 j.step("renamed-dir", old=r.old, new=r.new)
+                os.rename(r.old, r.new)
 
         for main, wts in p.git_repair:
             j.step("git-repair", main=main, worktrees=wts, output=_git_repair(main, wts))
 
         if p.move_folder and junction:
-            _link(p.src, p.dst)
             j.step("junction", path=p.src, target=p.dst)
+            _link(p.src, p.dst)
 
+        # What every store looks like right after the move: undo restores bytes only if still so.
+        # Session files are recorded where they live now, inside the renamed folders.
+        j.data["after"] = {}
+        for b in j.data["backups"]:
+            at = _located(b["path"], j.data["steps"])
+            j.data["after"][b["path"]] = {"at": at, "state": _state(at)}
         j.data["state"] = "applied"
         j.save()
         return j.data["id"]
     except BaseException as exc:
-        j.data["state"] = f"failed: {type(exc).__name__}: {exc}"
-        j.save()
-        undo(user_home, j.data["id"])
+        try:
+            errors = _rollback(j.data)
+        except _FolderBusy as busy:
+            errors = [str(busy)]
+        j.data["state"] = "rolled back" if not errors else "rollback incomplete"
+        j.data["errors"] = [f"{type(exc).__name__}: {exc}"] + errors
+        try:
+            j.save()
+        except OSError:
+            pass
+        if errors:
+            raise MoveError(f"{exc}\nRollback could not finish ({len(errors)} problem(s)); fix the cause and run "
+                            f"`agentroot undo {j.data['id']}`. Backups: {j.dir}\n  " + "\n  ".join(errors)) from exc
         raise
 
 
-def undo(user_home: str, journal_id: str | None = None) -> dict:
-    root = journal_root(user_home)
-    if journal_id is None:
-        ids = sorted(os.listdir(root)) if os.path.isdir(root) else []
-        if not ids:
-            raise MoveError("no journal to undo")
-        journal_id = ids[-1]
-    path = os.path.join(root, journal_id, "journal.json")
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
-    if data["state"] == "undone":
-        raise MoveError(f"journal {journal_id} was already undone")
+def _located(path: str, steps: list[dict]) -> str:
+    """Where a backed-up file is after the folder renames and merges."""
+    for s in steps:
+        if s["kind"] in ("renamed-dir", "merged-dir") and paths.is_within(path, s["old"]):
+            return os.path.join(s["new"], os.path.relpath(path, s["old"]))
+    return path
+
+
+class _FolderBusy(MoveError):
+    """The project folder could not be moved back; nothing else was touched."""
+
+
+def _rollback(data: dict) -> list[str]:
+    """Put back exactly what the journal recorded, step by step in reverse. Never stops at the first
+    problem: every step that can be reversed is, and the problems are returned."""
+    errors: list[str] = []
+
+    def attempt(what: str, fn, *args) -> None:
+        try:
+            fn(*args)
+        except (OSError, MoveError) as e:
+            errors.append(f"{what}: {e}")
+
+    # The project folder goes back first. If it cannot (a terminal or editor has a file open inside
+    # it), stop before touching anything else: every registry still agrees with where the folder is.
+    for step in data["steps"]:
+        if step["kind"] == "junction" and _is_link_to(step["path"], step["target"]):
+            attempt(f"remove junction {step['path']}", _unlink_dir, step["path"])
+    for step in data["steps"]:
+        if step["kind"] == "moved" and os.path.exists(step["dst"]) and not os.path.lexists(step["src"]):
+            attempt(f"move {step['dst']} back to {step['src']} (close anything open inside it)",
+                    os.rename, step["dst"], step["src"])
+    if errors:
+        for step in data["steps"]:
+            if step["kind"] == "junction" and not os.path.lexists(step["path"]):
+                attempt(f"recreate junction {step['path']}", _link, step["path"], step["target"])
+        raise _FolderBusy("\n  ".join(errors))
 
     for step in reversed(data["steps"]):
         kind = step["kind"]
-        if kind == "junction" and os.path.lexists(step["path"]):
-            if os.name == "nt":
-                os.rmdir(step["path"])  # removes the junction, not the target
-            else:
-                os.unlink(step["path"])
-        elif kind == "renamed-dir" and os.path.exists(step["new"]):
-            os.rename(step["new"], step["old"])
+        if kind == "renamed-dir" and os.path.exists(step["new"]) and not os.path.exists(step["old"]):
+            attempt(f"rename {step['new']} back", os.rename, step["new"], step["old"])
         elif kind == "merged-dir":
-            os.makedirs(step["old"], exist_ok=True)
+            attempt(f"recreate {step['old']}", os.makedirs, step["old"], 0o777, True)
             for child in step["children"]:
-                moved = os.path.join(step["new"], child)
-                if os.path.exists(moved):
-                    shutil.move(moved, os.path.join(step["old"], child))
-        elif kind == "moved" and os.path.exists(step["dst"]) and not os.path.exists(step["src"]):
-            shutil.move(step["dst"], step["src"])
+                moved, back = os.path.join(step["new"], child), os.path.join(step["old"], child)
+                if os.path.exists(moved) and not os.path.exists(back):
+                    attempt(f"move {moved} back", os.rename, moved, back)
 
     for b in data["backups"]:
         for suffix in ("", "-wal", "-shm"):
-            target = b["path"] + suffix
-            copy = b["copies"].get(suffix or "main")
-            if copy:
-                shutil.copy2(copy["file"], target)
-            elif suffix and os.path.exists(target):
-                os.remove(target)  # sidecar created after the backup; it belongs to the new state
+            target, copy = b["path"] + suffix, b["copies"].get(suffix or "main")
+            try:
+                if copy:
+                    if os.path.exists(target) and _sha(target) == copy["sha"]:
+                        continue  # never written, or already restored
+                    if _sha(copy["file"]) != copy["sha"]:
+                        raise OSError(f"backup copy {copy['file']} does not match its recorded sha")
+                    shutil.copy2(copy["file"], target)
+                elif suffix and os.path.exists(target):
+                    os.remove(target)  # sidecar created after the backup; it belongs to the new state
+            except OSError as e:
+                errors.append(f"restore {target}: {e}")
 
     for step in data["steps"]:
         if step["kind"] == "git-repair" and data["move_folder"]:
             main = paths.remap(step["main"], data["dst"], data["src"]) or step["main"]
             wts = [paths.remap(w, data["dst"], data["src"]) or w for w in step["worktrees"]]
-            _git_repair(main, wts)
+            try:
+                _git_repair(main, wts)
+            except OSError as e:
+                errors.append(f"git worktree repair in {main}: {e}")
+    return errors
 
-    data["state"] = "undone"
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=1)
+
+def _blocked(data: dict) -> list[str]:
+    """Why the folders cannot simply be put back as they were (something new sits in the way)."""
+    out = []
+    for step in data["steps"]:
+        kind = step["kind"]
+        if kind == "renamed-dir" and (os.path.exists(step["old"]) or not os.path.exists(step["new"])):
+            out.append(f"{step['old']} was recreated or {step['new']} is gone")
+        elif kind == "merged-dir" and any(os.path.exists(os.path.join(step["old"], c)) or
+                                          not os.path.exists(os.path.join(step["new"], c)) for c in step["children"]):
+            out.append(f"{step['old']} / {step['new']} changed")
+        elif kind == "moved":
+            junction = any(s["kind"] == "junction" for s in data["steps"])
+            if not os.path.isdir(step["dst"]) or (os.path.lexists(step["src"]) and not
+                                                    (junction and _is_link_to(step["src"], step["dst"]))):
+                out.append(f"{step['src']} or {step['dst']} changed")
+    return out
+
+
+def _load_journal(user_home: str, journal_id: str | None) -> tuple[str, dict]:
+    root = journal_root(user_home)
+    ids = sorted(os.listdir(root), reverse=True) if os.path.isdir(root) else []
+    for jid in [journal_id] if journal_id else ids:
+        path = os.path.join(root, jid, "journal.json")
+        if not os.path.isfile(path):
+            raise MoveError(f"no journal {jid}")
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        if journal_id or data["state"] in ("applied", "rollback incomplete"):
+            return path, data
+    raise MoveError("no move to undo")
+
+
+def undo(user_home: str, journal_id: str | None = None) -> dict:
+    """Reverse a move without losing anything written since.
+
+    If no store changed after the move, the backups are put back byte for byte. If an agent has
+    written since (new turns, new sessions, other projects), restoring old bytes would erase that,
+    so the move is reversed instead: a new move dst -> src, journaled and undoable like any other.
+    """
+    path, data = _load_journal(user_home, journal_id)
+    if data["state"] == "rollback incomplete":
+        try:
+            errors = _rollback(data)
+        except _FolderBusy as busy:
+            errors = [str(busy)]
+        if errors:
+            raise MoveError("rollback still incomplete:\n  " + "\n  ".join(errors))
+        data["state"] = "rolled back"
+    elif data["state"] != "applied":
+        raise MoveError(f"journal {data['id']} is {data['state']!r}; only an applied move can be undone")
+    else:
+        changed = [f for f, a in data["after"].items() if _state(a["at"]) != a["state"]]
+        blocked = _blocked(data)
+        if not changed and not blocked:
+            try:
+                errors = _rollback(data)
+            except _FolderBusy as busy:  # nothing was touched: the move is still applied
+                raise MoveError(f"undo did not start: {busy}") from None
+            if errors:
+                data["state"] = "rollback incomplete"
+                data["errors"] = errors
+                _write_json(path, data)
+                raise MoveError(f"undo could not finish; fix the cause and run `agentroot undo {data['id']}` "
+                                "again:\n  " + "\n  ".join(errors))
+            data["state"] = "undone"
+        else:
+            data["reversed_because"] = (changed + blocked)[:20]
+            data["state"] = "reversed by " + _reverse(user_home, data)
+    _write_json(path, data)
     return data
 
 
-def verify(user_home: str, src: str, dst: str) -> list[str]:
+def _reverse(user_home: str, data: dict) -> str:
+    src, dst = data["src"], data["dst"]
+    link = data["move_folder"] and _is_link_to(src, dst)
+    if link:
+        _unlink_dir(src)
+    try:
+        back = plan(user_home, dst, src, move_folder=data["move_folder"])
+        return execute(user_home, back, junction=False)
+    except BaseException:
+        if link and not os.path.lexists(src):
+            _link(src, dst)
+        raise
+
+
+def verify(user_home: str, src: str, dst: str, check_folder: bool = True) -> list[str]:
     """Problems left after a move: an empty list means every registry now points at dst."""
     problems = []
     again = plan(user_home, src, dst, move_folder=False)
     if again.text or again.sql or again.renames:
         problems.append(f"{again.change_count} references still point at {src}")
-    if not os.path.isdir(paths.display(dst)):
+    if check_folder and not os.path.isdir(paths.display(dst)):
         problems.append(f"{dst} does not exist")
     return problems
 

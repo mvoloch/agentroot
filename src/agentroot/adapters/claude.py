@@ -21,7 +21,7 @@ import os
 from collections.abc import Iterator
 
 from agentroot import paths
-from agentroot.adapters.util import load_json, looks_like_path, mtime_iso
+from agentroot.adapters.util import env_dir, load_json, looks_like_path, mtime_iso
 from agentroot.model import Home, Reference, Session
 
 CODE = "claude-code"
@@ -53,7 +53,7 @@ def homes(user_home: str) -> list[Home]:
             real_projects[real] = path
         add(CODE, path, note)
 
-    env = os.environ.get("CLAUDE_CONFIG_DIR")
+    env = env_dir(user_home, "CLAUDE_CONFIG_DIR")
     if env:
         add_code(env, "CLAUDE_CONFIG_DIR")
     add_code(os.path.join(user_home, ".claude"))
@@ -62,7 +62,7 @@ def homes(user_home: str) -> list[Home]:
             add_code(d, "extra config dir")
 
     desktop_candidates = [
-        os.path.join(os.environ.get("APPDATA", os.path.join(user_home, "AppData", "Roaming")), "Claude"),
+        os.path.join(env_dir(user_home, "APPDATA", "AppData", "Roaming"), "Claude"),
         os.path.join(user_home, "Library", "Application Support", "Claude"),
         os.path.join(user_home, ".config", "Claude"),
     ] + sorted(glob.glob(os.path.join(user_home, ".claude-*")))

@@ -44,6 +44,17 @@ def strings(obj: Any) -> Iterator[tuple[str, str]]:
             yield prefix, cur
 
 
+def env_dir(user_home: str, var: str, *default: str) -> str | None:
+    """$var for the real home; for any other --home, the default inside it.
+
+    Without this, a scan or move of a copy (`--home D:\\copy`) would still read and write the
+    real %APPDATA%, $CODEX_HOME or $CLAUDE_CONFIG_DIR.
+    """
+    real = os.path.normcase(os.path.abspath(user_home)) == os.path.normcase(os.path.abspath(os.path.expanduser("~")))
+    value = os.environ.get(var) if real else None
+    return value or (os.path.join(user_home, *default) if default else None)
+
+
 def looks_like_path(s: str) -> bool:
     s = s.strip()
     return (

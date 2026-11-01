@@ -28,7 +28,7 @@ import os
 import re
 from collections.abc import Iterator
 
-from agentroot.adapters.util import iso, load_json, looks_like_path, strings
+from agentroot.adapters.util import env_dir, iso, load_json, looks_like_path, strings
 from agentroot.model import Home, Reference, Session
 from agentroot.snapshot import columns, has_table, open_copy
 
@@ -129,7 +129,7 @@ def references(home: Home) -> Iterator[Reference]:
     for rel, role in (("antigravity-cli/settings.json", "trust"), ("config/config.json", "trust")):
         yield from _json_refs(gem, os.path.join(gem, *rel.split("/")), rel, role)
 
-    appdata = os.environ.get("APPDATA", os.path.join(os.path.dirname(gem), "AppData", "Roaming"))
+    appdata = env_dir(os.path.dirname(gem), "APPDATA", "AppData", "Roaming")
     user = os.path.join(appdata, "Antigravity", "User")
     for f in glob.glob(os.path.join(user, "workspaceStorage", "*", "workspace.json")):
         try:

@@ -1,6 +1,6 @@
 # Where each agent records a project folder
 
-What `agentroot scan` reads, and what `agentroot apply` will have to keep consistent.
+What `agentroot scan` reads, and what `agentroot move` keeps consistent.
 Every row was checked on a real Windows 11 machine on 2026-10-30 (Claude Code 2.1.312,
 Codex CLI 0.165.0, Antigravity `agy` 1.4.8) by reading field names, counts and paths, never
 conversation text or credentials. Codex and Antigravity were also asked to describe their own

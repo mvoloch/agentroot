@@ -151,12 +151,15 @@ Google.
 - [docs/STORAGE.md](docs/STORAGE.md): where each agent records a project path, with evidence.
 - [docs/RISKS.md](docs/RISKS.md): what breaks when a folder moves, and the rules `move` follows.
 
-## Contributing
+## Contact and contributing
 
-Reports from other machines are the most useful contribution right now: other operating
-systems, other app versions, other agents. Open an issue with the command, the output and your
-versions. Pull requests are welcome; run `python -m pytest` first. To report a security
-problem privately, see [SECURITY.md](SECURITY.md).
+- **Something broke, or worked on a setup not listed above:** [open an issue](../../issues)
+  with the command, the output and your versions. Reports from other machines are the most
+  useful contribution right now: other operating systems, other app versions, other agents.
+- **Questions, ideas, or how you use it:** [Discussions](../../discussions).
+- **A security problem:** report it privately, see [SECURITY.md](SECURITY.md).
+
+Pull requests are welcome; run `python -m pytest` first.
 
 ## Prior art
 
